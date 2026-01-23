@@ -12,19 +12,44 @@ export default function MeetingAI() {
   const [status, setStatus] = useState('');
   const [realMeetings, setRealMeetings] = useState([]);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [userInfo, setUserInfo] = useState(null);
-  const [showAccountSelector, setShowAccountSelector] = useState(false);
-  const [availableAccounts, setAvailableAccounts] = useState([]);
   const [theme, setTheme] = useState('light');
+  const [activeSpeakers, setActiveSpeakers] = useState({});
+  const [scheduledMeetings, setScheduledMeetings] = useState([]); // [meetingId, ...]
   const chatEndRef = useRef(null);
 
   useEffect(() => {
     loadMeetings();
     checkLogin();
+    loadSchedules();
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme);
     document.documentElement.setAttribute('data-theme', savedTheme);
+
+    // REAL-TIME UX: Poll for active meeting status (speakers)
+    const interval = setInterval(pollActiveBots, 3000);
+    return () => clearInterval(interval);
   }, []);
+
+  async function pollActiveBots() {
+    // Only poll if we have meetings that are in 'bot_joining' state
+    const botsToPoll = realMeetings.filter(m => m.access?.status === 'bot_joining' || m.access?.status === 'recording');
+    if (botsToPoll.length === 0) return;
+
+    for (const m of botsToPoll) {
+      // We'd need the sessionId from the initial response. 
+      // For now, let's assume we can query by meetingId if the bot-service supports it, 
+      // OR we use the check-access which we'll update to include bot session info.
+      try {
+        const res = await fetch(`/api/bot/status?meetingId=${m.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.currentSpeaker) {
+            setActiveSpeakers(prev => ({ ...prev, [m.id]: data.currentSpeaker }));
+          }
+        }
+      } catch (e) { }
+    }
+  }
 
   useEffect(() => {
     if (view === 'chat' && chatEndRef.current) {
@@ -60,42 +85,10 @@ export default function MeetingAI() {
 
 
 
-  async function checkLogin() {
+  function checkLogin() {
     const hasToken = document.cookie.includes('ms_token');
     setIsLoggedIn(hasToken);
-    if (hasToken) {
-      await loadUserInfo();
-      await loadRealMeetings();
-    }
-  }
-
-  async function loadUserInfo() {
-    try {
-      const res = await fetch('/api/user/info');
-      if (res.ok) {
-        const data = await res.json();
-        setUserInfo(data);
-      } else {
-        console.error('Failed to load user info');
-        setUserInfo(null);
-      }
-    } catch (e) {
-      console.error('Error loading user info:', e);
-      setUserInfo(null);
-    }
-  }
-
-  async function checkMultipleAccounts() {
-    // Check if there are multiple Microsoft accounts logged in
-    // This is a simplified check - in production you'd use MSAL's account APIs
-    try {
-      // Try to detect multiple accounts via localStorage or sessionStorage
-      // For now, we'll show account selector if user explicitly requests it
-      // In production, integrate with MSAL's getAllAccounts()
-      return false;
-    } catch (e) {
-      return false;
-    }
+    if (hasToken) loadRealMeetings();
   }
 
   async function loadRealMeetings() {
@@ -104,7 +97,20 @@ export default function MeetingAI() {
       const res = await fetch('/api/teams/recent');
       if (res.ok) {
         const data = await res.json();
-        setRealMeetings(Array.isArray(data) ? data : []);
+        const meetingsList = Array.isArray(data) ? data : [];
+
+        // Enrich meetings with access status
+        const enriched = await Promise.all(meetingsList.map(async (m) => {
+          try {
+            const checkRes = await fetch(`/api/check-access?meetingId=${encodeURIComponent(m.id)}&joinUrl=${encodeURIComponent(m.webUrl || '')}`);
+            const checkData = await checkRes.json();
+            return { ...m, access: checkData };
+          } catch (e) {
+            return { ...m, access: { status: 'unknown' } };
+          }
+        }));
+
+        setRealMeetings(enriched);
         setStatus('');
       } else {
         const err = await res.json();
@@ -116,52 +122,79 @@ export default function MeetingAI() {
     }
   }
 
-  async function ingestMeeting(teamsId) {
-    setStatus('Ingesting meeting transcript...');
-    const token = document.cookie.split('; ').find(row => row.startsWith('ms_token='))?.split('=')[1];
-
-    const res = await fetch('/api/ingest/teams', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accessToken: token, teamsMeetingId: teamsId })
-    });
-
-    if (res.ok) {
-      await loadMeetings();
-      setStatus('Ingest complete.');
-      setTimeout(() => setStatus(''), 3000);
-    } else {
-      const err = await res.json();
-      setStatus('Ingest failed: ' + err.error);
-    }
-  }
-
-  async function requestAccess(meetingId, organizerEmail, organizerName, meetingSubject) {
-    setStatus('Preparing access request...');
-    const token = document.cookie.split('; ').find(row => row.startsWith('ms_token='))?.split('=')[1];
-
-    const res = await fetch('/api/teams/request-access', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accessToken: token, meetingId })
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      // Open email client with pre-filled message
-      if (data.mailtoLink) {
-        window.location.href = data.mailtoLink;
-        setStatus('Email client opened. Please send the request to the organizer.');
-      } else {
-        setStatus(`Request prepared. Contact ${organizerEmail} to request access.`);
+  async function loadSchedules() {
+    try {
+      const res = await fetch('/api/schedule');
+      if (res.ok) {
+        const data = await res.json();
+        setScheduledMeetings(data.map(s => s.id));
       }
-      setTimeout(() => setStatus(''), 5000);
-    } else {
-      const err = await res.json();
-      setStatus('Request failed: ' + err.error);
-    }
+    } catch (e) { }
   }
 
+  async function scheduleMeeting(meeting) {
+    setStatus('Scheduling Skarya.AI Bot...');
+    try {
+      const isScheduled = scheduledMeetings.includes(meeting.id);
+      const res = await fetch(`/api/schedule${isScheduled ? `?id=${meeting.id}` : ''}`, {
+        method: isScheduled ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meeting })
+      });
+
+      if (res.ok) {
+        if (isScheduled) {
+          setScheduledMeetings(prev => prev.filter(id => id !== meeting.id));
+          setStatus('Auto-record removed.');
+        } else {
+          setScheduledMeetings(prev => [...prev, meeting.id]);
+          setStatus('Bot will join automatically when meeting starts!');
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      setStatus('Failed to update schedule.');
+    }
+    setTimeout(() => setStatus(''), 3000);
+  }
+
+  async function ingestMeetingHybrid(meeting) {
+    setStatus('Initializing Hybrid Processor...');
+    try {
+      const res = await fetch('/api/process-meeting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meetingId: meeting.id,
+          joinUrl: meeting.webUrl,
+          userEmail: isLoggedIn // Simple check
+        })
+      });
+
+      const data = await res.json();
+
+      if (data.status === 'success') {
+        await loadMeetings();
+        setStatus('Analysis complete.');
+      } else if (res.status === 429) {
+        setStatus('System Busy: All bots are in use. 🤖');
+        alert('The system is currently at maximum capacity. Please wait for another meeting to finish before joining.');
+      } else if (data.status === 'bot_joining') {
+        setStatus('Bot is joining the meeting... 🤖');
+        // Refresh list to show bot status
+        loadRealMeetings();
+      } else if (data.status === 'awaiting_consent') {
+        alert('Organizer consent needed for native transcript. Requesting bot fallback...');
+      } else {
+        setStatus('Processing: ' + (data.message || 'Starting...'));
+      }
+
+      setTimeout(() => setStatus(''), 5000);
+    } catch (e) {
+      console.error(e);
+      setStatus('Error starting process.');
+    }
+  }
 
   async function doUpload(e) {
     const file = e.target.files[0];
@@ -242,7 +275,7 @@ export default function MeetingAI() {
       {/* Top Navigation / Header */}
       <header className="app-header">
         <div className="app-brand">
-          <span style={{ fontSize: '20px' }}>⌯</span> MeetingAI Assistant
+          <span style={{ fontSize: '20px', color: 'var(--teams-purple)' }}>⌯</span> Skarya.AI Assistant
         </div>
         <div className="app-status">
           <button onClick={toggleTheme} className="header-action-btn" title="Toggle Dark/Light Mode">
@@ -261,7 +294,7 @@ export default function MeetingAI() {
             <div style={{ padding: '0 16px' }}>
               {!isLoggedIn ? (
                 <button
-                  onClick={() => window.location.href = '/api/auth/login?prompt=select_account'}
+                  onClick={() => window.location.href = '/api/auth/login'}
                   className="primary"
                   style={{ width: '100%', fontSize: '13px' }}
                 >
@@ -269,76 +302,80 @@ export default function MeetingAI() {
                 </button>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {/* User Account Info */}
-                  {userInfo && (
-                    <div style={{ 
-                      padding: '8px', 
-                      background: '#f5f5f5', 
-                      borderRadius: '4px', 
-                      fontSize: '11px',
-                      border: '1px solid #E1DFDD'
-                    }}>
-                      <div style={{ fontWeight: '600', marginBottom: '4px', color: '#323130' }}>
-                        {userInfo.displayName || 'User'}
-                      </div>
-                      <div style={{ color: '#666', fontSize: '10px', wordBreak: 'break-all' }}>
-                        {userInfo.email}
-                      </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 16px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ width: '8px', height: '8px', background: '#4CAF50', borderRadius: '50%', boxShadow: '0 0 8px rgba(76, 175, 80, 0.4)' }}></div>
+                      <span style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-primary)' }}>Live Sync Active</span>
                     </div>
-                  )}
-                  
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px' }}>
-                    <span style={{ color: 'green' }}>✓ Connected</span>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <button
-                        onClick={() => setShowAccountSelector(true)}
-                        style={{ background: 'none', border: 'none', color: '#6264A7', cursor: 'pointer', fontSize: '11px', padding: '2px 4px' }}
-                        title="Switch Account"
-                      >
-                        Switch
-                      </button>
-                      <button
-                        onClick={() => { document.cookie = 'ms_token=; Max-Age=0'; setIsLoggedIn(false); setUserInfo(null); }}
-                        style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '11px', padding: 0 }}
-                      >
-                        Disconnect
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => { document.cookie = 'ms_token=; Max-Age=0'; setIsLoggedIn(false); }}
+                      style={{ background: 'var(--hover-gray)', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '10px', padding: '4px 10px', borderRadius: '6px', fontWeight: '600' }}
+                    >
+                      Disconnect
+                    </button>
                   </div>
 
-                  <div style={{ maxHeight: '150px', overflowY: 'auto', border: '1px solid #E1DFDD', borderRadius: '4px' }}>
+                  <div className="sidebar-scroll-area" style={{ maxHeight: '450px', overflowY: 'auto', padding: '8px 12px' }}>
                     {realMeetings.length === 0 ? (
-                      <div style={{ padding: '8px', fontSize: '12px', color: '#666' }}>No meetings with transcripts available.</div>
+                      <div style={{ padding: '32px 16px', textAlign: 'center', fontSize: '13px', color: 'var(--text-secondary)' }}>No meetings found.</div>
                     ) : (
-                      realMeetings.map(rm => (
-                        <div key={rm.id} style={{ padding: '8px', borderBottom: '1px solid #f0f0f0', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px' }} title={rm.subject}>{rm.subject}</span>
-                            {rm.hasAccess ? (
-                              <button
-                                onClick={() => ingestMeeting(rm.id)}
-                                style={{ border: 'none', background: 'transparent', color: '#6264A7', cursor: 'pointer', fontSize: '16px', padding: '0 4px' }}
-                                title="Ingest Transcript"
-                              >
-                                ⇓
-                              </button>
-                            ) : rm.needsPermission ? (
-                              <button
-                                onClick={() => requestAccess(rm.id, rm.organizerEmail, rm.organizerName, rm.subject)}
-                                style={{ border: 'none', background: 'transparent', color: '#d13438', cursor: 'pointer', fontSize: '12px', padding: '2px 6px', borderRadius: '3px' }}
-                                title={`Request access from ${rm.organizerName || 'organizer'}`}
-                              >
-                                🔒 Request
-                              </button>
-                            ) : null}
-                          </div>
-                          {rm.needsPermission && rm.organizerName && (
-                            <div style={{ fontSize: '10px', color: '#666', fontStyle: 'italic' }}>
-                              Contact {rm.organizerName} for access
+                      realMeetings.map(rm => {
+                        const isScheduled = scheduledMeetings.includes(rm.id);
+                        const isLive = new Date(rm.start) <= new Date() && new Date(rm.end) >= new Date();
+                        return (
+                          <div key={rm.id} className="meeting-item" style={{ marginBottom: '12px', padding: '16px', border: '1px solid var(--border-subtle)', borderRadius: '12px', background: 'var(--teams-panel-bg)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
+                                <span style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>{rm.subject}</span>
+                                <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                  {new Date(rm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {rm.isOrganizer ? 'Organizer' : 'Subscriber'}
+                                </span>
+                                <span style={{
+                                  fontSize: '9.5px',
+                                  fontWeight: '800',
+                                  color: rm.access?.status === 'recording' ? '#e74c3c' :
+                                    rm.access?.status === 'ingested' ? '#27ae60' :
+                                      rm.access?.status === 'bot_joining' ? '#f39c12' : '#888',
+                                  marginTop: '2px',
+                                  textTransform: 'uppercase'
+                                }}>
+                                  {rm.access?.status === 'ingested' ? '✅ Captured' :
+                                    rm.access?.status === 'recording' ? '🔴 Recording Live' :
+                                      rm.access?.status === 'bot_joining' ? '⏳ Bot in Lobby' : '🤖 Bot Assistant'}
+                                </span>
+                              </div>
+                              {rm.access?.status === 'bot_joining' ? (
+                                <div className="spinner" style={{ width: '16px', height: '16px', borderTopColor: 'var(--teams-purple)' }}></div>
+                              ) : rm.access?.status === 'ingested' ? (
+                                <button
+                                  onClick={() => handleMeetingSelect(meetings.find(m => m.meetingId === rm.id) || { meetingId: rm.id, source: 'teams' })}
+                                  className="primary"
+                                  style={{ padding: '6px 14px', fontSize: '11px', borderRadius: '8px', minWidth: '94px', background: '#27ae60' }}
+                                >
+                                  VIEW
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => isLive ? ingestMeetingHybrid(rm) : scheduleMeeting(rm)}
+                                  className={isScheduled || (isLive && rm.access?.canIngest) ? 'primary' : 'secondary'}
+                                  style={{ padding: '6px 14px', fontSize: '11px', borderRadius: '8px', minWidth: '94px' }}
+                                >
+                                  {isScheduled ? 'SCHEDULED' : isLive ? 'JOIN BOT' : 'SCHEDULE'}
+                                </button>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      ))
+
+                            {activeSpeakers[rm.id] && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '12px', background: 'var(--chat-user-bg)', padding: '8px 12px', borderRadius: '10px', border: '1px solid rgba(98, 100, 167, 0.1)' }}>
+                                <div className="skarya-avatar active" style={{ width: '22px', height: '22px', fontSize: '10px' }}>S</div>
+                                <span style={{ fontSize: '11px', color: 'var(--teams-purple)', fontWeight: '700' }}>
+                                  {activeSpeakers[rm.id]} is speaking...
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -552,95 +589,6 @@ export default function MeetingAI() {
           )}
         </div>
       </div>
-
-      {/* Account Selector Modal */}
-      {showAccountSelector && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0, 0, 0, 0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000
-        }}>
-          <div style={{
-            background: 'white',
-            borderRadius: '8px',
-            padding: '24px',
-            maxWidth: '400px',
-            width: '90%',
-            boxShadow: '0 4px 20px rgba(0,0,0,0.3)'
-          }}>
-            <h3 style={{ margin: '0 0 16px 0', fontSize: '18px' }}>Select Account</h3>
-            <p style={{ fontSize: '14px', color: '#666', marginBottom: '16px' }}>
-              Choose which Microsoft account to use for accessing Teams meetings:
-            </p>
-            
-            {/* Current Account */}
-            {userInfo && (
-              <div style={{
-                padding: '12px',
-                border: '2px solid #6264A7',
-                borderRadius: '4px',
-                marginBottom: '12px',
-                cursor: 'pointer',
-                background: '#f0f0ff'
-              }}>
-                <div style={{ fontWeight: '600', marginBottom: '4px' }}>
-                  {userInfo.displayName || 'Current User'}
-                </div>
-                <div style={{ fontSize: '12px', color: '#666' }}>
-                  {userInfo.email}
-                </div>
-                <div style={{ fontSize: '10px', color: '#6264A7', marginTop: '4px' }}>
-                  ✓ Currently Active
-                </div>
-              </div>
-            )}
-
-            {/* Option to login with different account */}
-            <div style={{
-              padding: '12px',
-              border: '1px solid #E1DFDD',
-              borderRadius: '4px',
-              marginBottom: '16px',
-              cursor: 'pointer',
-              background: '#f9f9f9'
-            }}
-            onClick={() => {
-              document.cookie = 'ms_token=; Max-Age=0';
-              window.location.href = '/api/auth/login?prompt=select_account';
-            }}>
-              <div style={{ fontWeight: '600', marginBottom: '4px' }}>
-                Use Different Account
-              </div>
-              <div style={{ fontSize: '12px', color: '#666' }}>
-                Sign in with another Microsoft account
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setShowAccountSelector(false)}
-                style={{
-                  padding: '8px 16px',
-                  border: '1px solid #E1DFDD',
-                  background: 'white',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '14px'
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

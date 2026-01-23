@@ -1,7 +1,6 @@
 # Node/npm
 node_modules/
 .next/
-
 # Local mock DB and generated data
 data/
 
@@ -38,3 +37,4 @@ mock_data/*.vtt
 
 # Others
 .npm/
+!push-doc/*.txt

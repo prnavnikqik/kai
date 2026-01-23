@@ -260,6 +260,22 @@ Included VTT files:
 2. **Business Review** (4m) - Quarterly metrics and strategic planning
 3. **Standup** (30s) - Quick team sync
 
+---
+
+## 🤝 Contributing
+
+This is a prototype for demonstration. For production:
+- Add authentication & authorization
+- Implement rate limiting on AI endpoints
+- Add comprehensive error handling
+- Write unit & integration tests
+- Set up CI/CD pipeline
+
+---
+
+## 📄 License
+
+MIT License - See LICENSE file for details
 
 ---
 
@@ -271,3 +287,7 @@ Included VTT files:
 - **Inter Font** - Typography
 
 ---
+
+**Built with ❤️ for intelligent meeting management**
+
+For questions or issues, check the browser console for detailed error messages.
