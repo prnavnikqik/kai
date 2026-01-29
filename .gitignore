@@ -3,7 +3,7 @@ node_modules/
 .next/
 # Local mock DB and generated data
 data/
-
+.venv/
 # Environment
 .env
 .env.local
