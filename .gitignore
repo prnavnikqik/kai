@@ -26,7 +26,7 @@ coverage/
 
 # Documentation and markdown files (keep only README.md)
 docs/
-*.md
+
 !README.md
 
 # Mock data
@@ -35,6 +35,9 @@ mock_data/*.vtt
 # Databases
 *.sqlite
 *.db
-
+/*.md
+debug/
 # Others
 .npm/
+recordings/
+services/stt-server/recordings/
